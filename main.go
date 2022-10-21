@@ -14,19 +14,6 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// TODO: when the service starts, poll the database schema and generate endpoints
-// for every table, including setting their columns
-
-/*
-type batteryStatus byte
-type bikeStatus byte
-const (
-	bikeStatusReserved "reserved"
-	bikeStatusInUse "in_use"
-	bikeStatusDocked "docked"
-	)
-*/
-
 type bike struct {
 	BikeId     uint64 `json:"bike_id"`
 	BatteryPct uint8  `json:"battery_pct"`
