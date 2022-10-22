@@ -121,6 +121,8 @@ type stationResult struct {
 	Query    string    `json:"query"`
 }
 
+var stationColumns = []string{"station_id", "station_name", "station_location"}
+
 func fetchStations(key []string, val [][]string) ([]byte, error) {
 	if len(key) != len(val) {
 		return nil, errors.New("len(key) != len(val)")
@@ -132,7 +134,40 @@ func fetchStations(key []string, val [][]string) ([]byte, error) {
 		return nil, err
 	}
 
-	columns := []string{"station_id", "station_name", "station_location"}
+	whereStr, conds, err := getStationWhere(key, val)
+	if len(whereStr) > 0 {
+		whereStr = " WHERE " + whereStr
+	}
+	query := `select ` + strings.Join(stationColumns[:len(stationColumns)-1], ",") + `,ST_AsText(` + stationColumns[len(stationColumns)-1] + `) from stations` + whereStr + ` limit 1000`
+	fmt.Println("Running: " + query)
+	rows, err := db.Query(query, conds...)
+	if err != nil {
+		fmt.Printf("error in SQL: %s\nError: %s", query, err.Error())
+		return nil, err
+	}
+	stations := make([]station, 0, 8)
+	for rows.Next() {
+		var s station
+		err = rows.Scan(&s.StationId, &s.StationName, &s.StationLocation)
+		if err != nil {
+			return nil, err
+		}
+		tmpStr := strings.TrimPrefix(s.StationLocation, "POINT (")
+		tmpStr = strings.TrimSuffix(tmpStr, ")")
+		strs := strings.Split(tmpStr, " ")
+		s.StationLongitude, s.StationLatitude = strs[0], strs[1]
+		stations = append(stations, s)
+	}
+	fmt.Printf("returning %d stations\nquery: %s\n", len(stations), query)
+	res := &stationResult{Stations: stations, Query: query}
+	return json.Marshal(res)
+}
+
+func getStationWhere(key []string, val [][]string) (string, []any, error) {
+	if len(key) != len(val) {
+		return "", nil, errors.New("len(key) != len(val)")
+	}
+
 	where := make([]string, 0, len(key))
 	conds := make([]any, 0, len(val))
 	dist := make([]string, 0)
@@ -140,7 +175,7 @@ func fetchStations(key []string, val [][]string) ([]byte, error) {
 	for i, k := range key {
 		fmt.Println("checking key: ", k)
 		found := ""
-		for _, c := range columns {
+		for _, c := range stationColumns {
 			if strings.EqualFold(k, c) {
 				found = c
 				break
@@ -202,33 +237,69 @@ func fetchStations(key []string, val [][]string) ([]byte, error) {
 		}
 		where = append(where, strings.Join(w, " OR "))
 	}
-	whereStr := ""
-	if len(where) > 0 {
-		whereStr = " WHERE " + strings.Join(where, " AND ")
+	return strings.Join(where, " AND "), conds, nil
+}
+
+type jsonAndQuery struct {
+	Query string          `json:"query"`
+	Json  json.RawMessage `json:"stations"`
+}
+
+func fetchStationsAndBikes(key []string, val [][]string) ([]byte, error) {
+	dsn := os.Getenv("TIDB_DSN")
+	db, err := sql.Open("mysql", dsn)
+	defer db.Close()
+	if err != nil {
+		return nil, err
 	}
-	query := `select ` + strings.Join(columns[:len(columns)-1], ",") + `,ST_AsText(` + columns[len(columns)-1] + `) from stations` + whereStr + ` limit 1000`
+	whereStr, conds, err := getStationWhere(key, val)
+	if whereStr != "" {
+		whereStr = " WHERE " + whereStr
+	}
+	if err != nil {
+		fmt.Printf("error in generating WHERE, Error: %s", err.Error())
+		return nil, err
+	}
+	//query := `select ` + strings.Join(stationColumns[:len(stationColumns)-1], ",") + `,ST_AsText(` + stationColumns[len(stationColumns)-1] + `) from stations` + whereStr + ` limit 1000`
+	queryStart := `select JSON_ARRAYAGG(o)
+from (
+  select JSON_OBJECT(
+    "station_id",s.station_id,
+    "station_name", s.station_name,
+    "station_location",ST_AsText(s.station_location),
+    "station_longitude",REGEXP_SUBSTR(ST_AsText(s.station_location),'[-.,0-9]+'),
+    "station_latitude",REGEXP_SUBSTR(ST_AsText(s.station_location),'[-.,0-9]+',1,2),
+    "bikes", JSON_ARRAYAGG(
+       JSON_OBJECT(
+          "bike_id",b.bike_id,
+          "battery_pct",b.battery_pct,
+          "status",b.status
+       )
+    )
+  ) as o
+  from stations s inner join bikes b on s.station_id = b.station_id`
+	queryEnd := ` group by s.station_id ) t;`
+
+	query := queryStart + whereStr + queryEnd
+
 	fmt.Println("Running: " + query)
 	rows, err := db.Query(query, conds...)
 	if err != nil {
 		fmt.Printf("error in SQL: %s\nError: %s", query, err.Error())
 		return nil, err
 	}
-	stations := make([]station, 0, 8)
+	ret := jsonAndQuery{}
+	ret.Query = query
 	for rows.Next() {
-		var s station
-		err = rows.Scan(&s.StationId, &s.StationName, &s.StationLocation)
+		retStr := ""
+		err = rows.Scan(&retStr)
 		if err != nil {
 			return nil, err
 		}
-		tmpStr := strings.TrimPrefix(s.StationLocation, "POINT (")
-		tmpStr = strings.TrimSuffix(tmpStr, ")")
-		strs := strings.Split(tmpStr, " ")
-		s.StationLongitude, s.StationLatitude = strs[0], strs[1]
-		stations = append(stations, s)
+		ret.Json = []byte(retStr)
+		break // Only one line expected
 	}
-	fmt.Printf("returning %d stations\nquery: %s\n", len(stations), query)
-	res := &stationResult{Stations: stations, Query: query}
-	return json.Marshal(res)
+	return json.Marshal(ret)
 }
 
 func stationsEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -246,13 +317,20 @@ func stationsEndpoint(w http.ResponseWriter, r *http.Request) {
 		vs = append(vs, v...)
 		vals = append(vals, vs)
 	}
-	json, err := fetchStations(keys, vals)
+	var ret []byte // json data
+	var err error
+	withBikes := r.Form.Get("bikes")
+	if withBikes != "" && withBikes != "0" {
+		ret, err = fetchStationsAndBikes(keys, vals)
+	} else {
+		ret, err = fetchStations(keys, vals)
+	}
 	if err != nil {
 		w.Write([]byte(`{"error":` + strconv.Quote(err.Error())))
 		fmt.Printf("stations error: %s", err.Error())
 		return
 	}
-	w.Write(json)
+	w.Write(ret)
 	fmt.Println("Served one request")
 }
 
