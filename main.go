@@ -86,6 +86,7 @@ func fetchBikes(key, val []string) ([]byte, error) {
 
 func bikesEndpoint(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Welcome to the bikesEndpoint!")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if err := r.ParseForm(); err != nil {
 		fmt.Printf("bikes form error: %s", err.Error())
 		return
@@ -107,9 +108,11 @@ func bikesEndpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 type station struct {
-	StationId       uint64 `json:"station_id"`
-	StationName     string `json:"station_name"`
-	StationLocation string `json:"station_location"`
+	StationId        uint64 `json:"station_id"`
+	StationName      string `json:"station_name"`
+	StationLocation  string `json:"station_location"`
+	StationLongitude string `json:"station_longitute"`
+	StationLatitude  string `json:"station_latitute"`
 	//StationLocation []byte `json:"station_location"`
 }
 
@@ -217,6 +220,10 @@ func fetchStations(key []string, val [][]string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		tmpStr := strings.TrimPrefix(s.StationLocation, "POINT (")
+		tmpStr = strings.TrimSuffix(tmpStr, ")")
+		strs := strings.Split(tmpStr, " ")
+		s.StationLongitude, s.StationLatitude = strs[0], strs[1]
 		stations = append(stations, s)
 	}
 	fmt.Printf("returning %d stations\nquery: %s\n", len(stations), query)
@@ -226,6 +233,7 @@ func fetchStations(key []string, val [][]string) ([]byte, error) {
 
 func stationsEndpoint(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Welcome to the stationsEndpoint!")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if err := r.ParseForm(); err != nil {
 		fmt.Printf("stations form error: %s", err.Error())
 		return
